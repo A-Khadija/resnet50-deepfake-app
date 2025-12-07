@@ -28,11 +28,19 @@ def load_model(model_name):
     filename = MODEL_FILES[model_name]
     try:
         with st.spinner(f"Downloading {model_name} from Hugging Face..."):
-            # This downloads the large file from HF and caches it
             model_path = hf_hub_download(repo_id=REPO_ID, filename=filename)
         
-        # Load into PyTorch
-        model = torch.load(model_path, map_location=device)
+        # FIX 1: Allow loading complex models (weights_only=False)
+        # FIX 2: Handle 'DataParallel' objects from Kaggle
+        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+        
+        # If the checkpoint is a DataParallel object, extract the inner module
+        if isinstance(checkpoint, torch.nn.DataParallel):
+            model = checkpoint.module
+        else:
+            model = checkpoint
+            
+        model.to(device)
         model.eval()
         return model
     except Exception as e:
