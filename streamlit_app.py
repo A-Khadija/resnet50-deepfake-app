@@ -30,11 +30,10 @@ def load_model(model_name):
         with st.spinner(f"Downloading {model_name} from Hugging Face..."):
             model_path = hf_hub_download(repo_id=REPO_ID, filename=filename)
         
-        # FIX 1: Allow loading complex models (weights_only=False)
-        # FIX 2: Handle 'DataParallel' objects from Kaggle
+        # Load the model
         checkpoint = torch.load(model_path, map_location=device, weights_only=False)
         
-        # If the checkpoint is a DataParallel object, extract the inner module
+        # Handle DataParallel (if the model was trained on multiple GPUs)
         if isinstance(checkpoint, torch.nn.DataParallel):
             model = checkpoint.module
         else:
@@ -42,6 +41,10 @@ def load_model(model_name):
             
         model.to(device)
         model.eval()
+        
+        for param in model.parameters():
+            param.requires_grad = True
+            
         return model
     except Exception as e:
         st.error(f"Error loading {model_name}: {e}")
