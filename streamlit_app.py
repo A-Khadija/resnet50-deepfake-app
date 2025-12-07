@@ -5,19 +5,37 @@ from torchvision import transforms
 from PIL import Image
 import numpy as np
 import cv2
-import matplotlib.pyplot as plt
+from huggingface_hub import hf_hub_download # New library
 
-# --- 1. CONFIGURATION & FILE PATHS ---
+# --- 1. CONFIGURATION ---
 st.set_page_config(page_title="Deepfake Inspector", layout="wide")
 
-# UPDATE THIS DICTIONARY WITH YOUR EXACT FILENAMES
+#  HUGGING FACE REPO ID
+REPO_ID = "KhadijaAsehnoune12/resnet50-deepfake-models" 
+
 MODEL_FILES = {
-    "Transfer Learning ResNet50": "deepfake_model_complete.pkl",
-    "Fine-Tuning ResNet50": "deepfake_model_finetuning.pkl"
+    "Transfer Learning": "deepfake_model_transferlearning.pkl",
+    "Fine-Tuning": "deepfake_model_finetuning.pkl"
 }
 
-CLASS_NAMES = ['Real', 'Fake'] 
+CLASS_NAMES = ['Real', 'Fake']
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# --- 2. MODEL LOADER (Using Hugging Face) ---
+@st.cache_resource
+def load_model(model_name):
+    filename = MODEL_FILES[model_name]
+    try:
+        # This downloads the file and caches it automatically
+        model_path = hf_hub_download(repo_id=REPO_ID, filename=filename)
+        
+        # Load model
+        model = torch.load(model_path, map_location=device)
+        model.eval()
+        return model
+    except Exception as e:
+        st.error(f"Failed to load model from Hugging Face: {e}")
+        return None
 
 # --- 2. GRAD-CAM CLASS ---
 class GradCAM:
