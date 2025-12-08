@@ -37,15 +37,15 @@ MODELS = {
     },
 
     # --- XCEPTION (299x299) ---
-    "Xception (TL)": {
+    "Xception (Transfer Learning)": {
         "repo_id": "HoudaTag/xception_TransfertLearnin",
         "filename": "xception_transfertLearning.pkl", 
-        "img_size": 299 
+        "img_size": 229 
     },
-    "Xception (FT)": {
+    "Xception (Fine-Tuning)": {
         "repo_id": "HoudaTag/xception_TransfertLearnin",
         "filename": "xception_finetuned.pkl", 
-        "img_size": 299 
+        "img_size": 229 
     }
 }
 
