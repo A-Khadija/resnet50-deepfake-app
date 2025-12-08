@@ -1,16 +1,18 @@
 import streamlit as st
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
-from torchvision import transforms
+from torchvision import transforms, models
 from PIL import Image
 import numpy as np
 import cv2
-from huggingface_hub import hf_hub_download  
+from huggingface_hub import hf_hub_download
+import timm  # pip install timm
 
 # --- 1. CONFIGURATION ---
 st.set_page_config(page_title="Deepfake Inspector", layout="wide")
 
-# ---  REPO, FILENAME, AND IMAGE SIZE CONFIGURATION ---
+# --- REPO, FILENAME, AND IMAGE SIZE CONFIGURATION ---
 MODELS = {
     # --- RESNET (224x224) ---
     "ResNet50 (Transfer Learning)": {
@@ -37,7 +39,7 @@ MODELS = {
     },
 
     # --- XCEPTION (299x299) ---
-  "Xception (Transfer Learning)": {
+    "Xception (Transfer Learning)": {
         "repo_id": "HoudaTag/xception_TransfertLearnin",
         "filename": "xception_transfertLearning.pkl", 
         "img_size": 299 
@@ -52,34 +54,98 @@ MODELS = {
 CLASS_NAMES = ['Real', 'Fake']
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# --- 2. MODEL LOADING ---
+# --- 2. MODEL ARCHITECTURE BUILDER ---
+def build_model_architecture(model_key):
+    """
+    Recreates the EXACT architecture used during training.
+    """
+    if "ResNet50" in model_key:
+        # Standard ResNet50 with modified FC
+        model = models.resnet50(weights=None)
+        num_ftrs = model.fc.in_features
+        model.fc = nn.Linear(num_ftrs, 2)
+        return model
+        
+    elif "EfficientNet" in model_key:
+        # Standard EfficientNet B4 with modified Classifier
+        model = models.efficientnet_b4(weights=None)
+        num_ftrs = model.classifier[1].in_features
+        model.classifier[1] = nn.Linear(num_ftrs, 2)
+        return model
+        
+    elif "Xception" in model_key:
+        # REPLICATE YOUR TRAINING LOGIC EXACTLY
+        model = timm.create_model("xception", pretrained=False, num_classes=2)
+        
+        # We must replicate the 'head replacement' logic so keys match (fc.1.weight vs fc.weight)
+        if hasattr(model, "fc"):
+            in_features = model.fc.in_features
+            model.fc = nn.Sequential(
+                nn.Dropout(0.5),
+                nn.Linear(in_features, 2)
+            )
+        elif hasattr(model, "classifier"):
+            in_features = model.classifier.in_features
+            model.classifier = nn.Sequential(
+                nn.Dropout(0.5),
+                nn.Linear(in_features, 2)
+            )
+        elif hasattr(model, "head"):
+            in_features = model.head.in_features
+            model.head = nn.Sequential(
+                nn.Dropout(0.5),
+                nn.Linear(in_features, 2)
+            )
+        return model
+        
+    return None
+
 @st.cache_resource
 def load_model(model_key):
     config = MODELS[model_key]
     try:
+        # 1. Download
         model_path = hf_hub_download(repo_id=config["repo_id"], filename=config["filename"])
+        
+        # 2. Load Checkpoint
         checkpoint = torch.load(model_path, map_location=device, weights_only=False)
         
-        if isinstance(checkpoint, torch.nn.DataParallel):
-            model = checkpoint.module
-        else:
-            model = checkpoint
+        # 3. Handle State Dict (Weights Only) vs Full Model
+        if isinstance(checkpoint, dict):
+            # It's a dictionary of weights -> Build architecture first
+            model = build_model_architecture(model_key)
+            if model is None:
+                return "Architecture not defined"
             
+            # Clean keys if they were saved with DataParallel ('module.' prefix)
+            new_state_dict = {}
+            for k, v in checkpoint.items():
+                name = k.replace("module.", "") if k.startswith("module.") else k
+                new_state_dict[name] = v
+                
+            # Load weights
+            model.load_state_dict(new_state_dict, strict=False)
+            
+        else:
+            # It's a full model object (Older save format)
+            if isinstance(checkpoint, torch.nn.DataParallel):
+                model = checkpoint.module
+            else:
+                model = checkpoint
+        
         model.to(device)
         model.eval()
         
-        # Enable gradients for Grad-CAM
         for param in model.parameters():
             param.requires_grad = True
+            
         return model
+
     except Exception as e:
-        return str(e) 
+        return f"Error: {str(e)}"
 
 # --- 3. DYNAMIC PREPROCESSING ---
 def process_image(image, size):
-    """
-    Resizes and normalizes the image based on the specific model's requirement.
-    """
     transform = transforms.Compose([
         transforms.Resize((size, size)), 
         transforms.ToTensor(),
@@ -90,18 +156,26 @@ def process_image(image, size):
 # --- 4. GRAD-CAM HELPERS ---
 def get_target_layer(model, model_name):
     try:
-        # ResNet usually uses 'layer4'
+        # ResNet
         if hasattr(model, 'layer4'):
             return model.layer4[-1]
         
-        # EfficientNet usually uses 'features' or 'blocks'
+        # EfficientNet
         if hasattr(model, 'features'):
             return model.features[-1]
             
-        # Common fallback
-        if hasattr(model, 'net') and hasattr(model.net, 'features'):
-             return model.net.features[-1]
-
+        # Xception (Timm)
+        # Timm Xception usually puts the last conv in .act4 or .conv4 depending on version
+        # We try to grab the last sequential block or specific layer
+        if "Xception" in model_name:
+            if hasattr(model, 'act4'): return model.act4
+            if hasattr(model, 'conv4'): return model.conv4
+            # Fallback: traverse children to find last conv
+            layers = list(model.children())
+            for layer in reversed(layers):
+                if isinstance(layer, nn.Conv2d):
+                    return layer
+        
         return None
     except:
         return None
