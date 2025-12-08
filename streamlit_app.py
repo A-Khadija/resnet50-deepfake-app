@@ -27,7 +27,7 @@ MODELS = {
     # --- EFFICIENTNET B4 (380x380) ---
     "EfficientNet B4 (TL)": {
         "repo_id": "obm-ml/Efficientnetb4-TL",
-        "filename": " efficientnetb4_best.pkl",  
+        "filename": "efficientnetb4_best.pkl",  
         "img_size": 380
     },
     "EfficientNet B4 (FN)": {
