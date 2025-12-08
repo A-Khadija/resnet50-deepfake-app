@@ -40,12 +40,12 @@ MODELS = {
     "Xception (Transfer Learning)": {
         "repo_id": "HoudaTag/xception_TransfertLearnin",
         "filename": "xception_transfertLearning.pkl", 
-        "img_size": 229 
+        "img_size": 299 
     },
     "Xception (Fine-Tuning)": {
         "repo_id": "HoudaTag/xception_TransfertLearnin",
         "filename": "xception_finetuned.pkl", 
-        "img_size": 229 
+        "img_size": 299 
     }
 }
 
