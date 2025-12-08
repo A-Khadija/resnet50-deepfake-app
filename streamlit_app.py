@@ -37,7 +37,7 @@ MODELS = {
     },
 
     # --- XCEPTION (299x299) ---
-    "Xception (Transfer Learning)": {
+  "Xception (Transfer Learning)": {
         "repo_id": "HoudaTag/xception_TransfertLearnin",
         "filename": "xception_transfertLearning.pkl", 
         "img_size": 299 
@@ -73,7 +73,7 @@ def load_model(model_key):
             param.requires_grad = True
         return model
     except Exception as e:
-        return None 
+        return str(e) 
 
 # --- 3. DYNAMIC PREPROCESSING ---
 def process_image(image, size):
@@ -89,19 +89,16 @@ def process_image(image, size):
 
 # --- 4. GRAD-CAM HELPERS ---
 def get_target_layer(model, model_name):
-    """
-    Attempts to find the last convolutional layer based on architecture name/structure.
-    """
     try:
         # ResNet usually uses 'layer4'
         if hasattr(model, 'layer4'):
             return model.layer4[-1]
         
-        # EfficientNet usually uses 'features' or 'blocks' (getting the last block)
+        # EfficientNet usually uses 'features' or 'blocks'
         if hasattr(model, 'features'):
             return model.features[-1]
             
-        # Common fallback for simple sequential models
+        # Common fallback
         if hasattr(model, 'net') and hasattr(model.net, 'features'):
              return model.net.features[-1]
 
@@ -115,6 +112,7 @@ class GradCAM:
         self.target_layer = target_layer
         self.gradients = None
         self.activations = None
+        
         self.target_layer.register_forward_hook(self.save_activation)
         self.target_layer.register_full_backward_hook(self.save_gradient)
 
@@ -156,7 +154,7 @@ def visualize_cam(mask, img_pil):
 
 # --- 5. STREAMLIT APP UI ---
 st.title("Deepfake Detection System")
-st.markdown("Multi-Model Consensus: **ResNet (224)**, **EfficientNet (380)**, **Xception (229)**")
+st.markdown("Multi-Model Consensus: **ResNet (224)**, **EfficientNet (380)**, **Xception (299)**")
 
 # Sidebar
 st.sidebar.header("Configuration")
@@ -172,7 +170,6 @@ if uploaded_file:
     if st.button("Start Analysis"):
         with st.spinner("Processing..."):
             
-            # Determine models to run
             if selected_option == "All Models":
                 models_to_run = list(MODELS.keys())
                 st.info(f"Running Ensemble Analysis on {len(models_to_run)} models...")
@@ -181,7 +178,6 @@ if uploaded_file:
 
             results_accumulator = []
             
-            # Grid Layout
             if len(models_to_run) > 1:
                 cols = st.columns(3)
             else:
@@ -196,14 +192,15 @@ if uploaded_file:
                     st.write(f"**{model_name}**")
                     
                     # 1. Load Model
-                    model = load_model(model_name)
-                    if model is None:
-                        st.error(f"Failed to load. Verify Filename in Code.")
+                    model_or_error = load_model(model_name)
+                    if isinstance(model_or_error, str):
+                        st.error(f"Failed to load: {model_or_error}")
                         continue
-
+                    
+                    model = model_or_error
+                    
                     # 2. Process Image (Unique Size per Model)
                     req_size = MODELS[model_name]["img_size"]
-                    # We process fresh for every model to ensure correct resizing
                     img_tensor = process_image(image, req_size).to(device)
 
                     try:
@@ -236,7 +233,7 @@ if uploaded_file:
                             with torch.enable_grad():
                                 activation_map = cam_extractor(img_tensor, class_idx=pred.item())
                                 overlay, heatmap = visualize_cam(activation_map, image)
-                                st.image(overlay, caption=f"CAM ({model_name})", use_column_width=True)
+                                st.image(overlay, caption=f"CAM ({model_name})", use_container_width=True)
                         else:
                             st.warning("Layer hook failed (No CAM)")
                         
