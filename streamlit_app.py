@@ -7,14 +7,17 @@ from PIL import Image
 import numpy as np
 import cv2
 from huggingface_hub import hf_hub_download
-import timm  # pip install timm
+import timm 
+import gc  # <--- Added for memory management
 
 # --- 1. CONFIGURATION ---
 st.set_page_config(page_title="Deepfake Inspector", layout="wide")
 
+# Reduce PyTorch memory footprint on CPU
+torch.set_num_threads(4) 
+
 # --- REPO, FILENAME, AND IMAGE SIZE CONFIGURATION ---
 MODELS = {
-    # --- RESNET (224x224) ---
     "ResNet50 (Transfer Learning)": {
         "repo_id": "KhadijaAsehnoune12/resnet50-deepfake-models",
         "filename": "deepfake_model_transferlearning.pkl",
@@ -25,8 +28,6 @@ MODELS = {
         "filename": "deepfake_model_finetuning.pkl",
         "img_size": 224
     },
-    
-    # --- EFFICIENTNET B4 (380x380) ---
     "EfficientNet B4 (Transfer Learning)": {
         "repo_id": "obm-ml/Efficientnetb4-TL",
         "filename": "efficientnetb4_best.pkl",  
@@ -37,8 +38,6 @@ MODELS = {
         "filename": "efficientnetb4_finetuned_best.pkl",  
         "img_size": 380
     },
-
-    # --- XCEPTION (299x299) ---
     "Xception (Transfer Learning)": {
         "repo_id": "KhadijaAsehnoune12/xception_deepfake",
         "filename": "xception_deepfake_full.pkl", 
@@ -56,9 +55,6 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # --- 2. MODEL ARCHITECTURE BUILDER ---
 def build_model_architecture(model_key):
-    """
-    Recreates the EXACT architecture used during training.
-    """
     if "ResNet50" in model_key:
         model = models.resnet50(weights=None)
         num_ftrs = model.fc.in_features
@@ -72,70 +68,49 @@ def build_model_architecture(model_key):
         return model
         
     elif "Xception" in model_key:
-        # UPDATED: Use 'legacy_xception' to silence the timm warning
-        # This is the same architecture as the old 'xception'
         model = timm.create_model("legacy_xception", pretrained=False, num_classes=2)
         
         if hasattr(model, "fc"):
             in_features = model.fc.in_features
-            model.fc = nn.Sequential(
-                nn.Dropout(0.5),
-                nn.Linear(in_features, 2)
-            )
+            model.fc = nn.Sequential(nn.Dropout(0.5), nn.Linear(in_features, 2))
         elif hasattr(model, "classifier"):
             in_features = model.classifier.in_features
-            model.classifier = nn.Sequential(
-                nn.Dropout(0.5),
-                nn.Linear(in_features, 2)
-            )
+            model.classifier = nn.Sequential(nn.Dropout(0.5), nn.Linear(in_features, 2))
         elif hasattr(model, "head"):
             in_features = model.head.in_features
-            model.head = nn.Sequential(
-                nn.Dropout(0.5),
-                nn.Linear(in_features, 2)
-            )
+            model.head = nn.Sequential(nn.Dropout(0.5), nn.Linear(in_features, 2))
         return model
     return None
     
-@st.cache_resource
-def load_model(model_key):
+# --- CRITICAL FIX: max_entries=1 prevents hoarding all models in RAM ---
+@st.cache_resource(max_entries=1, show_spinner=False)
+def load_model_cached(model_key):
+    # This wrapper function handles the heavy lifting
+    return _load_model_logic(model_key)
+
+def _load_model_logic(model_key):
     config = MODELS[model_key]
     try:
-        # 1. Download
         model_path = hf_hub_download(repo_id=config["repo_id"], filename=config["filename"])
-        
-        # 2. Load Checkpoint
         checkpoint = torch.load(model_path, map_location=device, weights_only=False)
         
-        # 3. Handle State Dict (Weights Only) vs Full Model
         if isinstance(checkpoint, dict):
-            # It's a dictionary of weights -> Build architecture first
             model = build_model_architecture(model_key)
-            if model is None:
-                return "Architecture not defined"
+            if model is None: return "Architecture not defined"
             
-            # Clean keys if they were saved with DataParallel ('module.' prefix)
             new_state_dict = {}
             for k, v in checkpoint.items():
                 name = k.replace("module.", "") if k.startswith("module.") else k
                 new_state_dict[name] = v
-                
-            # Load weights
             model.load_state_dict(new_state_dict, strict=False)
-            
         else:
-            # It's a full model object (Older save format)
             if isinstance(checkpoint, torch.nn.DataParallel):
                 model = checkpoint.module
             else:
                 model = checkpoint
         
         model.to(device)
-        model.eval()
-        
-        for param in model.parameters():
-            param.requires_grad = True
-            
+        model.eval() # Always default to eval to save memory
         return model
 
     except Exception as e:
@@ -150,26 +125,15 @@ def process_image(image, size):
     ])
     return transform(image).unsqueeze(0)
 
-# --- 4. GRAD-CAM HELPERS (FIXED) ---
-def get_last_conv(module):
-    """Recursively find the last Conv2d layer."""
-    for m in reversed(list(module.modules())):
-        if isinstance(m, nn.Conv2d):
-            return m
-    return None
-
+# --- 4. GRAD-CAM HELPERS ---
 def get_target_layer(model, model_name):
     try:
         if hasattr(model, 'layer4'): return model.layer4[-1] # ResNet
         if hasattr(model, 'features'): return model.features[-1] # EfficientNet
-            
         if "Xception" in model_name:
             if hasattr(model, 'act4'): return model.act4
-            if hasattr(model, 'conv4'): return model.conv4
-            # Fallback for nested structures
-            return get_last_conv(model)
-        
-        return get_last_conv(model)
+            return list(model.modules())[-2] # Fallback
+        return list(model.modules())[-2]
     except:
         return None
 
@@ -179,30 +143,28 @@ class GradCAM:
         self.target_layer = target_layer
         self.gradients = None
         self.activations = None
-        
-        # Only register forward hook
-        self.target_layer.register_forward_hook(self.save_activation)
+        self.handle = self.target_layer.register_forward_hook(self.save_activation)
 
     def save_activation(self, module, input, output):
         self.activations = output
-        # CRITICAL FIX: Register hook on the TENSOR, not the module
-        # This bypasses the "inplace" error causing the crash
         if output.requires_grad:
             output.register_hook(self.save_gradient)
 
     def save_gradient(self, grad):
         self.gradients = grad
 
+    def close(self):
+        # Clean up hooks to free memory
+        self.handle.remove()
+
     def __call__(self, x, class_idx=None):
         self.gradients = None
         self.activations = None
         
-        # Forward
         output = self.model(x)
         if class_idx is None:
             class_idx = output.argmax(dim=1).item()
             
-        # Backward
         self.model.zero_grad()
         score = output[0, class_idx]
         score.backward()
@@ -213,7 +175,6 @@ class GradCAM:
         gradients = self.gradients[0]
         activations = self.activations[0]
         
-        # CAM computation
         weights = torch.mean(gradients, dim=(1, 2))
         cam = torch.zeros(activations.shape[1:], dtype=torch.float32, device=device)
         
@@ -238,51 +199,55 @@ def visualize_cam(mask, img_pil):
 st.title("Deepfake Detection System")
 st.markdown("Multi-Model Consensus: **ResNet (224)**, **EfficientNet (380)**, **Xception (299)**")
 
-# Sidebar
-st.sidebar.header("Configuration")
 options = ["All Models"] + list(MODELS.keys())
 selected_option = st.sidebar.selectbox("Select Model Mode", options)
-
-uploaded_file = st.file_uploader("Upload Image for Analysis", type=["jpg", "png", "jpeg"])
+uploaded_file = st.file_uploader("Upload Image", type=["jpg", "png", "jpeg"])
 
 if uploaded_file:
     image = Image.open(uploaded_file).convert('RGB')
     st.image(image, caption="Original Input", width=300)
-    
 
     if st.button("Start Analysis"):
-        with st.spinner("Processing..."):
+        with st.spinner("Initializing..."):
             
+            # Decide which models to run
             if selected_option == "All Models":
                 models_to_run = list(MODELS.keys())
-                st.info(f"Running Ensemble Analysis on {len(models_to_run)} models...")
+                st.info(f"Running sequential analysis on {len(models_to_run)} models. Please wait...")
             else:
                 models_to_run = [selected_option]
 
             results_accumulator = []
             
+            # Setup columns
             if len(models_to_run) > 1:
                 cols = st.columns(3)
             else:
                 cols = [st.container()]
 
             # --- MAIN LOOP ---
+            progress_bar = st.progress(0)
+            
             for idx, model_name in enumerate(models_to_run):
                 current_col = cols[idx % 3] if len(models_to_run) > 1 else cols[0]
+                
+                # Update progress
+                progress_bar.progress((idx + 1) / len(models_to_run))
                 
                 with current_col:
                     st.divider()
                     st.write(f"**{model_name}**")
                     
-                    # 1. Load Model
-                    model_or_error = load_model(model_name)
+                    # 1. Load Model (Uses cached loader with max_entries=1)
+                    model_or_error = load_model_cached(model_name)
+                    
                     if isinstance(model_or_error, str):
-                        st.error(f"Failed to load: {model_or_error}")
+                        st.error(f"Load Failed")
                         continue
                     
                     model = model_or_error
                     
-                    # 2. Process Image (Unique Size per Model)
+                    # 2. Process Image
                     req_size = MODELS[model_name]["img_size"]
                     img_tensor = process_image(image, req_size).to(device)
 
@@ -290,38 +255,47 @@ if uploaded_file:
                         # 3. Inference
                         target_layer = get_target_layer(model, model_name)
                         
-                        with torch.no_grad():
+                        # Enable gradients ONLY for CAM calculation
+                        with torch.set_grad_enabled(True):
                             output = model(img_tensor)
                             probs = F.softmax(output, dim=1)
                             conf, pred = torch.max(probs, 1)
                             label = CLASS_NAMES[pred.item()]
                             confidence_val = conf.item()
 
-                        results_accumulator.append({
-                            "model": model_name,
-                            "label": label,
-                            "confidence": confidence_val
-                        })
+                            # 4. Grad-CAM
+                            if target_layer:
+                                cam_extractor = GradCAM(model, target_layer)
+                                activation_map = cam_extractor(img_tensor, class_idx=pred.item())
+                                overlay, heatmap = visualize_cam(activation_map, image)
+                                st.image(overlay, caption=f"CAM ({model_name})", use_column_width=True)
+                                cam_extractor.close() # Important: Remove hooks
+                            else:
+                                st.warning("No CAM available")
 
-                        # 4. Display Result
-                        st.caption(f"Input Size: {req_size}x{req_size}")
+                        # Display Text Result
                         if label == "Fake":
                             st.error(f"FAKE ({confidence_val:.2%})")
                         else:
                             st.success(f"REAL ({confidence_val:.2%})")
 
-                        # 5. Grad-CAM
-                        if target_layer:
-                            cam_extractor = GradCAM(model, target_layer)
-                            with torch.enable_grad():
-                                activation_map = cam_extractor(img_tensor, class_idx=pred.item())
-                                overlay, heatmap = visualize_cam(activation_map, image)
-                                st.image(overlay, caption=f"CAM ({model_name})", width="stretch")                        
-                        else:
-                            st.warning("Layer hook failed (No CAM)")
-                        
+                        results_accumulator.append({
+                            "model": model_name, "label": label, "confidence": confidence_val
+                        })
+
                     except Exception as e:
-                        st.error(f"Inference Error: {e}")
+                        st.error(f"Error: {e}")
+                    
+                    # --- CRITICAL: FORCE MEMORY CLEANUP ---
+                    # Delete local references
+                    del img_tensor
+                    del output
+                    # Force Garbage Collection
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+            progress_bar.empty()
 
             # --- CONSENSUS LOGIC ---
             if selected_option == "All Models" and results_accumulator:
@@ -333,27 +307,14 @@ if uploaded_file:
                 
                 n_fake = len(fake_votes)
                 n_real = len(real_votes)
-                total = len(results_accumulator)
                 
                 if n_fake > n_real:
                     final_verdict = "FAKE"
-                    avg_conf = sum([r['confidence'] for r in fake_votes]) / n_fake if n_fake > 0 else 0
-                    color_func = st.error
+                    avg_conf = sum([r['confidence'] for r in fake_votes]) / n_fake
+                    st.error(f"### Majority: {final_verdict} ({n_fake} vs {n_real})")
                 elif n_real > n_fake:
                     final_verdict = "REAL"
-                    avg_conf = sum([r['confidence'] for r in real_votes]) / n_real if n_real > 0 else 0
-                    color_func = st.success
+                    avg_conf = sum([r['confidence'] for r in real_votes]) / n_real
+                    st.success(f"### Majority: {final_verdict} ({n_real} vs {n_fake})")
                 else:
-                    final_verdict = "UNCERTAIN"
-                    avg_conf = 0.0
-                    color_func = st.warning
-
-                c1, c2 = st.columns([2, 1])
-                with c1:
-                    color_func(f"### Majority: {final_verdict}")
-                    st.write(f"**Votes:** {n_fake} Fake vs {n_real} Real")
-                    if total > 0:
-                        st.progress(n_fake / total, text="Fake Vote Share")
-                
-                with c2:
-                    st.metric("Avg Confidence (Winner)", f"{avg_conf:.1%}")
+                    st.warning("### Result: UNCERTAIN (Tie)")
