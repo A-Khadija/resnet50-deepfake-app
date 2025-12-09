@@ -104,38 +104,30 @@ def build_model_architecture(model_key):
 def load_model(model_key):
     config = MODELS[model_key]
     try:
-        # 1. Download
         model_path = hf_hub_download(repo_id=config["repo_id"], filename=config["filename"])
-        
-        # 2. Load Checkpoint
         checkpoint = torch.load(model_path, map_location=device, weights_only=False)
         
-        # 3. Handle State Dict (Weights Only) vs Full Model
         if isinstance(checkpoint, dict):
-            # It's a dictionary of weights -> Build architecture first
             model = build_model_architecture(model_key)
-            if model is None:
-                return "Architecture not defined"
+            if model is None: return "Architecture not defined"
             
-            # Clean keys if they were saved with DataParallel ('module.' prefix)
             new_state_dict = {}
             for k, v in checkpoint.items():
                 name = k.replace("module.", "") if k.startswith("module.") else k
                 new_state_dict[name] = v
-                
-            # Load weights
             model.load_state_dict(new_state_dict, strict=False)
-            
         else:
-            # It's a full model object (Older save format)
             if isinstance(checkpoint, torch.nn.DataParallel):
                 model = checkpoint.module
             else:
                 model = checkpoint
         
+        # --- FIX: DISABLE INPLACE OPERATIONS ---
+        model = make_gradcam_compatible(model)
+        # ---------------------------------------
+
         model.to(device)
         model.eval()
-        
         for param in model.parameters():
             param.requires_grad = True
             
@@ -155,10 +147,11 @@ def process_image(image, size):
 
 # --- 4. GRAD-CAM HELPERS (UPDATED) ---
 
+# Add this helper function somewhere before load_model
 def make_gradcam_compatible(model):
     """
-    Critical for Xception: Recursively sets inplace=False for all modules.
-    This prevents the 'Output 0 of BackwardHookFunctionBackward is a view' error.
+    Recursively sets inplace=False for all modules.
+    This fixes the 'BackwardHookFunctionBackward' error for Xception/EfficientNet.
     """
     for module in model.modules():
         if hasattr(module, 'inplace'):
@@ -202,61 +195,59 @@ class GradCAM:
         self.target_layer = target_layer
         self.gradients = None
         self.activations = None
-        self.hooks = []
         
-        # Attach hooks
+        # Keep hooks in a list to remove them later if needed (optional but good practice)
+        self.hooks = []
         self.hooks.append(self.target_layer.register_forward_hook(self.save_activation))
+        
+        # FIX 1: Use register_backward_hook or register_full_backward_hook carefully
         self.hooks.append(self.target_layer.register_full_backward_hook(self.save_gradient))
 
     def save_activation(self, module, input, output):
         self.activations = output
 
     def save_gradient(self, module, grad_input, grad_output):
-        # --- FIX: CLONE THE GRADIENT ---
-        # This prevents the 'modified inplace' error
-        self.gradients = grad_output[0].clone() 
-
-    def remove_hooks(self):
-        for hook in self.hooks:
-            hook.remove()
-        self.hooks = []
+        # FIX 2: CLONE the output. This is the specific fix for the error you received.
+        self.gradients = grad_output[0].clone()
 
     def __call__(self, x, class_idx=None):
-        try:
-            output = self.model(x)
-            if class_idx is None:
-                class_idx = output.argmax(dim=1).item()
-            
-            self.model.zero_grad()
-            score = output[0, class_idx]
-            score.backward()
-            
-            if self.gradients is None or self.activations is None:
-                return None
-                
-            gradients = self.gradients
-            activations = self.activations
-            
-            # Remove batch dimension if present
-            if len(gradients.shape) == 4: gradients = gradients[0]
-            if len(activations.shape) == 4: activations = activations[0]
+        output = self.model(x)
+        if class_idx is None:
+            class_idx = output.argmax(dim=1).item()
+        
+        self.model.zero_grad()
+        score = output[0, class_idx]
+        
+        # This backward call triggers the hooks
+        score.backward()
+        
+        gradients = self.gradients
+        activations = self.activations
+        
+        # Handle cases where dimensions might differ (e.g. batch size dim)
+        if len(gradients.shape) == 4:
+            gradients = gradients[0]
+        if len(activations.shape) == 4:
+            activations = activations[0]
 
-            weights = torch.mean(gradients, dim=(1, 2))
-            cam = torch.zeros(activations.shape[1:], dtype=torch.float32, device=device)
+        weights = torch.mean(gradients, dim=(1, 2))
+        
+        # Create empty cam
+        cam = torch.zeros(activations.shape[1:], dtype=torch.float32, device=device)
+        
+        for i, w in enumerate(weights):
+            cam += w * activations[i]
             
-            for i, w in enumerate(weights):
-                cam += w * activations[i]
-                
-            cam = F.relu(cam)
-            cam = cam - cam.min()
-            cam = cam / (cam.max() + 1e-7)
+        cam = F.relu(cam)
+        cam = cam - cam.min()
+        cam = cam / (cam.max() + 1e-7)
+        
+        # Clean up hooks to prevent memory leaks or multiple hooks piling up
+        for h in self.hooks:
+            h.remove()
             
-            return cam.cpu().detach().numpy()
-            
-        finally:
-            # Always clean up hooks to prevent memory leaks
-            self.remove_hooks()
-
+        return cam.cpu().detach().numpy()
+        
 # --- 5. STREAMLIT APP UI ---
 st.title("Deepfake Detection System")
 st.markdown("Multi-Model Consensus: **ResNet (224)**, **EfficientNet (380)**, **Xception (299)**")
