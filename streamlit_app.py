@@ -248,6 +248,7 @@ uploaded_file = st.file_uploader("Upload Image for Analysis", type=["jpg", "png"
 if uploaded_file:
     image = Image.open(uploaded_file).convert('RGB')
     st.image(image, caption="Original Input", width=300)
+    
 
     if st.button("Start Analysis"):
         with st.spinner("Processing..."):
@@ -315,8 +316,7 @@ if uploaded_file:
                             with torch.enable_grad():
                                 activation_map = cam_extractor(img_tensor, class_idx=pred.item())
                                 overlay, heatmap = visualize_cam(activation_map, image)
-                                st.image(overlay, caption=f"CAM ({model_name})", use_container_width=True)
-                        else:
+                                st.image(overlay, caption=f"CAM ({model_name})", width="stretch")                        else:
                             st.warning("Layer hook failed (No CAM)")
                         
                     except Exception as e:
@@ -325,7 +325,7 @@ if uploaded_file:
             # --- CONSENSUS LOGIC ---
             if selected_option == "All Models" and results_accumulator:
                 st.divider()
-                st.header("🏆 Final Consensus Verdict")
+                st.header("Final Consensus Verdict")
                 
                 fake_votes = [r for r in results_accumulator if r['label'] == 'Fake']
                 real_votes = [r for r in results_accumulator if r['label'] == 'Real']
