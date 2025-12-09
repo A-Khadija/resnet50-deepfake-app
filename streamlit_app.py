@@ -79,7 +79,7 @@ def build_model_architecture(model_key):
     except:
         return None
 
-# --- NO CACHE (Low Memory Mode) ---
+# --- NO CACHE 
 def load_model_uncached(model_key):
     config = MODELS[model_key]
     try:
@@ -164,7 +164,6 @@ def visualize_cam(mask, img_pil):
 
 # --- 5. APP UI ---
 st.title("Deepfake Detection System")
-st.markdown("Low-Memory Mode Active")
 
 options = ["All Models"] + list(MODELS.keys())
 selected = st.sidebar.selectbox("Mode", options)
@@ -233,7 +232,7 @@ if upload and st.button("Start Analysis"):
                         
                         if map_data is not None:
                             viz = visualize_cam(map_data, image)
-                            st.image(viz, caption=f"CAM: {lbl}", use_container_width=True)
+                            st.image(viz, caption=f"CAM: {lbl}", width=True)
                         else:
                             st.warning("Heatmap skipped")
                     
