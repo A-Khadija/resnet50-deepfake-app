@@ -14,10 +14,9 @@ import time
 # --- 1. CONFIGURATION ---
 st.set_page_config(page_title="Deepfake Inspector", layout="wide")
 
-# Force CPU usage to avoid CUDA memory overhead on free tier
-# (Unless you have a paid GPU instance, CPU is safer for memory)
+# EXTREME MEMORY SAVER: Limit CPU threads to 1 to reduce overhead
+torch.set_num_threads(1)
 device = torch.device("cpu")
-torch.set_num_threads(2) # Limit threads to reduce overhead
 
 # --- REPO CONFIGURATION ---
 MODELS = {
@@ -41,7 +40,7 @@ MODELS = {
         "filename": "efficientnetb4_finetuned_best.pkl",  
         "img_size": 380
     },
-     "Xception (Transfer Learning)": {
+    "Xception (Transfer Learning)": {
         "repo_id": "HoudaTag/xception_TransfertLearnin",
         "filename": "xception_transfertLearning.pkl", 
         "img_size": 299
@@ -57,25 +56,28 @@ CLASS_NAMES = ['Real', 'Fake']
 
 # --- 2. MODEL BUILDER ---
 def build_model_architecture(model_key):
-    if "ResNet50" in model_key:
-        model = models.resnet50(weights=None)
-        num_ftrs = model.fc.in_features
-        model.fc = nn.Linear(num_ftrs, 2)
-    elif "EfficientNet" in model_key:
-        model = models.efficientnet_b4(weights=None)
-        num_ftrs = model.classifier[1].in_features
-        model.classifier[1] = nn.Linear(num_ftrs, 2)
-    elif "Xception" in model_key:
-        model = timm.create_model("legacy_xception", pretrained=False, num_classes=2)
-        if hasattr(model, "fc"):
-            model.fc = nn.Sequential(nn.Dropout(0.5), nn.Linear(model.fc.in_features, 2))
-        elif hasattr(model, "classifier"):
-            model.classifier = nn.Sequential(nn.Dropout(0.5), nn.Linear(model.classifier.in_features, 2))
-        elif hasattr(model, "head"):
-            model.head = nn.Sequential(nn.Dropout(0.5), nn.Linear(model.head.in_features, 2))
-    else:
+    try:
+        if "ResNet50" in model_key:
+            model = models.resnet50(weights=None)
+            num_ftrs = model.fc.in_features
+            model.fc = nn.Linear(num_ftrs, 2)
+        elif "EfficientNet" in model_key:
+            model = models.efficientnet_b4(weights=None)
+            num_ftrs = model.classifier[1].in_features
+            model.classifier[1] = nn.Linear(num_ftrs, 2)
+        elif "Xception" in model_key:
+            model = timm.create_model("legacy_xception", pretrained=False, num_classes=2)
+            if hasattr(model, "fc"):
+                model.fc = nn.Sequential(nn.Dropout(0.5), nn.Linear(model.fc.in_features, 2))
+            elif hasattr(model, "classifier"):
+                model.classifier = nn.Sequential(nn.Dropout(0.5), nn.Linear(model.classifier.in_features, 2))
+            elif hasattr(model, "head"):
+                model.head = nn.Sequential(nn.Dropout(0.5), nn.Linear(model.head.in_features, 2))
+        else:
+            return None
+        return model
+    except:
         return None
-    return model
 
 # --- NO CACHE (Low Memory Mode) ---
 def load_model_uncached(model_key):
@@ -162,6 +164,7 @@ def visualize_cam(mask, img_pil):
 
 # --- 5. APP UI ---
 st.title("Deepfake Detection System")
+st.markdown("Low-Memory Mode Active")
 
 options = ["All Models"] + list(MODELS.keys())
 selected = st.sidebar.selectbox("Mode", options)
@@ -172,10 +175,11 @@ if upload and st.button("Start Analysis"):
     st.image(image, width=300, caption="Input")
     
     models_to_run = list(MODELS.keys()) if selected == "All Models" else [selected]
-    results = []
+    results_accumulator = []
     
+    # --- GRID LAYOUT SETUP ---
     if len(models_to_run) > 1:
-        cols = st.columns(3) # Creates 3 columns side-by-side
+        cols = st.columns(3) 
     else:
         cols = [st.container()]
 
@@ -184,13 +188,13 @@ if upload and st.button("Start Analysis"):
     for i, name in enumerate(models_to_run):
         progress.progress((i + 1) / len(models_to_run))
         
-        # --- ADD THIS TO SELECT THE CURRENT COLUMN ---
+        # Select column
         current_col = cols[i % 3] if len(models_to_run) > 1 else cols[0]
         
-        # --- CHANGE "with container:" TO "with current_col:" ---
         with current_col:
             st.divider()
             st.write(f"**{name}**")
+            
             # 1. LOAD (No Cache)
             model = load_model_uncached(name)
             if isinstance(model, str):
@@ -204,7 +208,7 @@ if upload and st.button("Start Analysis"):
             try:
                 target = get_target_layer(model, name)
                 
-                # Force gradients for frozen models (Fixes "Heatmap unavailable")
+                # Force gradients for frozen models
                 if target:
                     for p in target.parameters(): p.requires_grad = True
                 
@@ -217,42 +221,47 @@ if upload and st.button("Start Analysis"):
                     probs = F.softmax(out, dim=1)
                     conf, pred = torch.max(probs, 1)
                     lbl = CLASS_NAMES[pred.item()]
-                    val = conf.item()
+                    
+                    # --- SAFETY VALVE: CONVERT TENSOR TO FLOAT ---
+                    # usage of .item() here is CRITICAL to prevent memory leaks
+                    val = conf.item() 
                     
                     # Visualize
                     if cam_runner:
                         map_data = cam_runner(tensor, pred.item())
-                        cam_runner.close() # Clean hook immediately
+                        cam_runner.close() 
                         
                         if map_data is not None:
-                            # Fixes "OpenCV Error"
                             viz = visualize_cam(map_data, image)
-                            st.image(viz, caption=f"CAM: {lbl}", width=300)
+                            st.image(viz, caption=f"CAM: {lbl}", use_container_width=True)
                         else:
-                            st.warning("Heatmap skipped (gradient missing)")
+                            st.warning("Heatmap skipped")
                     
                     if lbl == "Fake": st.error(f"FAKE ({val:.1%})")
                     else: st.success(f"REAL ({val:.1%})")
                     
-                    results.append({"label": lbl, "confidence": val})
+                    # Append SAFE (float) values only
+                    results_accumulator.append({"label": lbl, "confidence": val})
             
             except Exception as e:
                 st.error(f"Error: {e}")
             
-            # 4. NUCLEAR CLEANUP (Crucial for Streamlit Cloud)
+            # 4. NUCLEAR CLEANUP
+            # Explicitly delete heavy objects
             del model
             del tensor
             del out
             if 'cam_runner' in locals() and cam_runner: del cam_runner
             
-            # Force Python to release memory NOW
+            # Force cleanup twice to catch circular references
             gc.collect()
-            time.sleep(0.5) # Allow OS to reclaim RAM
+            gc.collect()
+            time.sleep(0.2) 
             
-    # --- RESTORED CONSENSUS LOGIC ---
+    # --- CONSENSUS LOGIC ---
     if selected == "All Models" and results_accumulator:
         st.divider()
-        st.header("Final Consensus Verdict")
+        st.header(" Final Consensus Verdict")
 
         fake_votes = [r for r in results_accumulator if r['label'] == 'Fake']
         real_votes = [r for r in results_accumulator if r['label'] == 'Real']
