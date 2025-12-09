@@ -232,7 +232,7 @@ if upload and st.button("Start Analysis"):
                         
                         if map_data is not None:
                             viz = visualize_cam(map_data, image)
-                            st.image(viz, caption=f"CAM: {lbl}", width=True)
+                            st.image(viz, caption=f"CAM: {lbl}", width="stretch")
                         else:
                             st.warning("Heatmap skipped")
                     
