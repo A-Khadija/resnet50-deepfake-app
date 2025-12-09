@@ -150,30 +150,26 @@ def process_image(image, size):
     ])
     return transform(image).unsqueeze(0)
 
-# --- 4. GRAD-CAM HELPERS ---
+# --- 4. GRAD-CAM HELPERS (FIXED) ---
+def get_last_conv(module):
+    """Recursively find the last Conv2d layer."""
+    for m in reversed(list(module.modules())):
+        if isinstance(m, nn.Conv2d):
+            return m
+    return None
+
 def get_target_layer(model, model_name):
     try:
-        # ResNet
-        if hasattr(model, 'layer4'):
-            return model.layer4[-1]
-        
-        # EfficientNet
-        if hasattr(model, 'features'):
-            return model.features[-1]
+        if hasattr(model, 'layer4'): return model.layer4[-1] # ResNet
+        if hasattr(model, 'features'): return model.features[-1] # EfficientNet
             
-        # Xception (Timm)
-        # Timm Xception usually puts the last conv in .act4 or .conv4 depending on version
-        # We try to grab the last sequential block or specific layer
         if "Xception" in model_name:
             if hasattr(model, 'act4'): return model.act4
             if hasattr(model, 'conv4'): return model.conv4
-            # Fallback: traverse children to find last conv
-            layers = list(model.children())
-            for layer in reversed(layers):
-                if isinstance(layer, nn.Conv2d):
-                    return layer
+            # Fallback for nested structures
+            return get_last_conv(model)
         
-        return None
+        return get_last_conv(model)
     except:
         return None
 
@@ -184,61 +180,51 @@ class GradCAM:
         self.gradients = None
         self.activations = None
         
-        # We ONLY register the forward hook here.
-        # The backward gradient capture is now handled dynamically inside the forward pass.
+        # Only register forward hook
         self.target_layer.register_forward_hook(self.save_activation)
 
     def save_activation(self, module, input, output):
         self.activations = output
-        
-        # --- CRITICAL FIX ---
-        # Instead of a module-level backward hook (which crashes on in-place ops),
-        # we register a hook on the tensor itself.
+        # CRITICAL FIX: Register hook on the TENSOR, not the module
+        # This bypasses the "inplace" error causing the crash
         if output.requires_grad:
             output.register_hook(self.save_gradient)
 
     def save_gradient(self, grad):
-        # Tensor hooks receive just the gradient tensor
         self.gradients = grad
 
     def __call__(self, x, class_idx=None):
-        # 1. Reset state
         self.gradients = None
         self.activations = None
         
-        # 2. Forward Pass
+        # Forward
         output = self.model(x)
-        
         if class_idx is None:
             class_idx = output.argmax(dim=1).item()
             
-        # 3. Backward Pass
+        # Backward
         self.model.zero_grad()
         score = output[0, class_idx]
         score.backward()
         
-        # 4. Generate CAM
         if self.gradients is None or self.activations is None:
-            return None # Safety check if hooks didn't fire
+            return None
             
         gradients = self.gradients[0]
         activations = self.activations[0]
         
-        # Global Average Pooling
+        # CAM computation
         weights = torch.mean(gradients, dim=(1, 2))
-        
-        # Weighted combination of activation maps
         cam = torch.zeros(activations.shape[1:], dtype=torch.float32, device=device)
+        
         for i, w in enumerate(weights):
             cam += w * activations[i]
             
-        # ReLU and Normalization
         cam = F.relu(cam)
         cam = cam - cam.min()
         cam = cam / (cam.max() + 1e-7)
-        
         return cam.cpu().detach().numpy()
-
+        
 def visualize_cam(mask, img_pil):
     heatmap = cv2.resize(mask, (img_pil.width, img_pil.height))
     heatmap = np.uint8(255 * heatmap)
