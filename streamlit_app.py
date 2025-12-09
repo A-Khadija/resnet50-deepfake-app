@@ -40,8 +40,8 @@ MODELS = {
 
     # --- XCEPTION (299x299) ---
     "Xception (Transfer Learning)": {
-        "repo_id": "KhadijaAsehnoune12/xception_deepfake",
-        "filename": "xception_deepfake_full.pkl", 
+        "repo_id": "HoudaTag/xception_TransfertLearnin",
+        "filename": "xception_transfertLearning.pkl", 
         "img_size": 299 
     },
     "Xception (Fine-Tuning)": {
@@ -153,31 +153,47 @@ def process_image(image, size):
     ])
     return transform(image).unsqueeze(0)
 
-# --- 4. GRAD-CAM HELPERS ---
+# --- 4. GRAD-CAM HELPERS (UPDATED) ---
+
+def make_gradcam_compatible(model):
+    """
+    Critical for Xception: Recursively sets inplace=False for all modules.
+    This prevents the 'Output 0 of BackwardHookFunctionBackward is a view' error.
+    """
+    for module in model.modules():
+        if hasattr(module, 'inplace'):
+            module.inplace = False
+    return model
+
 def get_target_layer(model, model_name):
     try:
-        # ResNet
+        # --- ResNet ---
         if hasattr(model, 'layer4'):
             return model.layer4[-1]
         
-        # EfficientNet
+        # --- EfficientNet ---
         if hasattr(model, 'features'):
             return model.features[-1]
             
-        # Xception (Timm)
-        # Timm Xception usually puts the last conv in .act4 or .conv4 depending on version
-        # We try to grab the last sequential block or specific layer
+        # --- Xception (Timm) ---
         if "Xception" in model_name:
+            # Timm Xception usually puts the last features in 'act4' or 'conv4'
             if hasattr(model, 'act4'): return model.act4
             if hasattr(model, 'conv4'): return model.conv4
-            # Fallback: traverse children to find last conv
-            layers = list(model.children())
-            for layer in reversed(layers):
-                if isinstance(layer, nn.Conv2d):
-                    return layer
+            
+            # Fallback: check the 'blocks' if it exists (some variants)
+            if hasattr(model, 'blocks'): return model.blocks[-1]
+            
+            # generic fallback: last Conv2d in the whole model
+            last_conv = None
+            for name, module in model.named_modules():
+                if isinstance(module, nn.Conv2d):
+                    last_conv = module
+            return last_conv
         
         return None
-    except:
+    except Exception as e:
+        print(f"Error finding target layer: {e}")
         return None
 
 class GradCAM:
@@ -186,45 +202,60 @@ class GradCAM:
         self.target_layer = target_layer
         self.gradients = None
         self.activations = None
+        self.hooks = []
         
-        self.target_layer.register_forward_hook(self.save_activation)
-        self.target_layer.register_full_backward_hook(self.save_gradient)
+        # Attach hooks
+        self.hooks.append(self.target_layer.register_forward_hook(self.save_activation))
+        self.hooks.append(self.target_layer.register_full_backward_hook(self.save_gradient))
 
     def save_activation(self, module, input, output):
         self.activations = output
 
     def save_gradient(self, module, grad_input, grad_output):
-        self.gradients = grad_output[0]
+        # --- FIX: CLONE THE GRADIENT ---
+        # This prevents the 'modified inplace' error
+        self.gradients = grad_output[0].clone() 
+
+    def remove_hooks(self):
+        for hook in self.hooks:
+            hook.remove()
+        self.hooks = []
 
     def __call__(self, x, class_idx=None):
-        output = self.model(x)
-        if class_idx is None:
-            class_idx = output.argmax(dim=1).item()
-        self.model.zero_grad()
-        score = output[0, class_idx]
-        score.backward()
-        
-        gradients = self.gradients[0]
-        activations = self.activations[0]
-        weights = torch.mean(gradients, dim=(1, 2))
-        cam = torch.zeros(activations.shape[1:], dtype=torch.float32, device=device)
-        
-        for i, w in enumerate(weights):
-            cam += w * activations[i]
+        try:
+            output = self.model(x)
+            if class_idx is None:
+                class_idx = output.argmax(dim=1).item()
             
-        cam = F.relu(cam)
-        cam = cam - cam.min()
-        cam = cam / (cam.max() + 1e-7)
-        return cam.cpu().detach().numpy()
+            self.model.zero_grad()
+            score = output[0, class_idx]
+            score.backward()
+            
+            if self.gradients is None or self.activations is None:
+                return None
+                
+            gradients = self.gradients
+            activations = self.activations
+            
+            # Remove batch dimension if present
+            if len(gradients.shape) == 4: gradients = gradients[0]
+            if len(activations.shape) == 4: activations = activations[0]
 
-def visualize_cam(mask, img_pil):
-    heatmap = cv2.resize(mask, (img_pil.width, img_pil.height))
-    heatmap = np.uint8(255 * heatmap)
-    heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
-    heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
-    original = np.array(img_pil)
-    superimposed = cv2.addWeighted(original, 0.6, heatmap, 0.4, 0)
-    return superimposed, heatmap
+            weights = torch.mean(gradients, dim=(1, 2))
+            cam = torch.zeros(activations.shape[1:], dtype=torch.float32, device=device)
+            
+            for i, w in enumerate(weights):
+                cam += w * activations[i]
+                
+            cam = F.relu(cam)
+            cam = cam - cam.min()
+            cam = cam / (cam.max() + 1e-7)
+            
+            return cam.cpu().detach().numpy()
+            
+        finally:
+            # Always clean up hooks to prevent memory leaks
+            self.remove_hooks()
 
 # --- 5. STREAMLIT APP UI ---
 st.title("Deepfake Detection System")
