@@ -104,30 +104,38 @@ def build_model_architecture(model_key):
 def load_model(model_key):
     config = MODELS[model_key]
     try:
+        # 1. Download
         model_path = hf_hub_download(repo_id=config["repo_id"], filename=config["filename"])
+        
+        # 2. Load Checkpoint
         checkpoint = torch.load(model_path, map_location=device, weights_only=False)
         
+        # 3. Handle State Dict (Weights Only) vs Full Model
         if isinstance(checkpoint, dict):
+            # It's a dictionary of weights -> Build architecture first
             model = build_model_architecture(model_key)
-            if model is None: return "Architecture not defined"
+            if model is None:
+                return "Architecture not defined"
             
+            # Clean keys if they were saved with DataParallel ('module.' prefix)
             new_state_dict = {}
             for k, v in checkpoint.items():
                 name = k.replace("module.", "") if k.startswith("module.") else k
                 new_state_dict[name] = v
+                
+            # Load weights
             model.load_state_dict(new_state_dict, strict=False)
+            
         else:
+            # It's a full model object (Older save format)
             if isinstance(checkpoint, torch.nn.DataParallel):
                 model = checkpoint.module
             else:
                 model = checkpoint
         
-        # --- FIX: DISABLE INPLACE OPERATIONS ---
-        model = make_gradcam_compatible(model)
-        # ---------------------------------------
-
         model.to(device)
         model.eval()
+        
         for param in model.parameters():
             param.requires_grad = True
             
@@ -145,48 +153,31 @@ def process_image(image, size):
     ])
     return transform(image).unsqueeze(0)
 
-# --- 4. GRAD-CAM HELPERS (UPDATED) ---
-
-# Add this helper function somewhere before load_model
-def make_gradcam_compatible(model):
-    """
-    Recursively sets inplace=False for all modules.
-    This fixes the 'BackwardHookFunctionBackward' error for Xception/EfficientNet.
-    """
-    for module in model.modules():
-        if hasattr(module, 'inplace'):
-            module.inplace = False
-    return model
-
+# --- 4. GRAD-CAM HELPERS ---
 def get_target_layer(model, model_name):
     try:
-        # --- ResNet ---
+        # ResNet
         if hasattr(model, 'layer4'):
             return model.layer4[-1]
         
-        # --- EfficientNet ---
+        # EfficientNet
         if hasattr(model, 'features'):
             return model.features[-1]
             
-        # --- Xception (Timm) ---
+        # Xception (Timm)
+        # Timm Xception usually puts the last conv in .act4 or .conv4 depending on version
+        # We try to grab the last sequential block or specific layer
         if "Xception" in model_name:
-            # Timm Xception usually puts the last features in 'act4' or 'conv4'
             if hasattr(model, 'act4'): return model.act4
             if hasattr(model, 'conv4'): return model.conv4
-            
-            # Fallback: check the 'blocks' if it exists (some variants)
-            if hasattr(model, 'blocks'): return model.blocks[-1]
-            
-            # generic fallback: last Conv2d in the whole model
-            last_conv = None
-            for name, module in model.named_modules():
-                if isinstance(module, nn.Conv2d):
-                    last_conv = module
-            return last_conv
+            # Fallback: traverse children to find last conv
+            layers = list(model.children())
+            for layer in reversed(layers):
+                if isinstance(layer, nn.Conv2d):
+                    return layer
         
         return None
-    except Exception as e:
-        print(f"Error finding target layer: {e}")
+    except:
         return None
 
 class GradCAM:
@@ -196,43 +187,26 @@ class GradCAM:
         self.gradients = None
         self.activations = None
         
-        # Keep hooks in a list to remove them later if needed (optional but good practice)
-        self.hooks = []
-        self.hooks.append(self.target_layer.register_forward_hook(self.save_activation))
-        
-        # FIX 1: Use register_backward_hook or register_full_backward_hook carefully
-        self.hooks.append(self.target_layer.register_full_backward_hook(self.save_gradient))
+        self.target_layer.register_forward_hook(self.save_activation)
+        self.target_layer.register_full_backward_hook(self.save_gradient)
 
     def save_activation(self, module, input, output):
         self.activations = output
 
     def save_gradient(self, module, grad_input, grad_output):
-        # FIX 2: CLONE the output. This is the specific fix for the error you received.
-        self.gradients = grad_output[0].clone()
+        self.gradients = grad_output[0]
 
     def __call__(self, x, class_idx=None):
         output = self.model(x)
         if class_idx is None:
             class_idx = output.argmax(dim=1).item()
-        
         self.model.zero_grad()
         score = output[0, class_idx]
-        
-        # This backward call triggers the hooks
         score.backward()
         
-        gradients = self.gradients
-        activations = self.activations
-        
-        # Handle cases where dimensions might differ (e.g. batch size dim)
-        if len(gradients.shape) == 4:
-            gradients = gradients[0]
-        if len(activations.shape) == 4:
-            activations = activations[0]
-
+        gradients = self.gradients[0]
+        activations = self.activations[0]
         weights = torch.mean(gradients, dim=(1, 2))
-        
-        # Create empty cam
         cam = torch.zeros(activations.shape[1:], dtype=torch.float32, device=device)
         
         for i, w in enumerate(weights):
@@ -241,13 +215,17 @@ class GradCAM:
         cam = F.relu(cam)
         cam = cam - cam.min()
         cam = cam / (cam.max() + 1e-7)
-        
-        # Clean up hooks to prevent memory leaks or multiple hooks piling up
-        for h in self.hooks:
-            h.remove()
-            
         return cam.cpu().detach().numpy()
-        
+
+def visualize_cam(mask, img_pil):
+    heatmap = cv2.resize(mask, (img_pil.width, img_pil.height))
+    heatmap = np.uint8(255 * heatmap)
+    heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+    heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
+    original = np.array(img_pil)
+    superimposed = cv2.addWeighted(original, 0.6, heatmap, 0.4, 0)
+    return superimposed, heatmap
+
 # --- 5. STREAMLIT APP UI ---
 st.title("Deepfake Detection System")
 st.markdown("Multi-Model Consensus: **ResNet (224)**, **EfficientNet (380)**, **Xception (299)**")
