@@ -268,7 +268,7 @@ if uploaded_file:
                                 cam_extractor = GradCAM(model, target_layer)
                                 activation_map = cam_extractor(img_tensor, class_idx=pred.item())
                                 overlay, heatmap = visualize_cam(activation_map, image)
-                                st.image(overlay, caption=f"CAM ({model_name})", use_column_width=True)
+                                st.image(overlay, caption=f"CAM ({model_name})", width=True)
                                 cam_extractor.close() # Important: Remove hooks
                             else:
                                 st.warning("No CAM available")
