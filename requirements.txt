@@ -7,4 +7,3 @@ opencv-python-headless
 matplotlib
 huggingface_hub
 timm
-gc
