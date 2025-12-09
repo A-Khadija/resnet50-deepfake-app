@@ -249,11 +249,38 @@ if upload and st.button("Start Analysis"):
             gc.collect()
             time.sleep(0.5) # Allow OS to reclaim RAM
             
-    # Consensus
-    if results and selected == "All Models":
+    # --- RESTORED CONSENSUS LOGIC ---
+    if selected == "All Models" and results_accumulator:
         st.divider()
-        fakes = len([r for r in results if r['label'] == 'Fake'])
-        reals = len([r for r in results if r['label'] == 'Real'])
-        if fakes > reals: st.error("### FINAL VERDICT: FAKE")
-        elif reals > fakes: st.success("### FINAL VERDICT: REAL")
-        else: st.warning("### FINAL VERDICT: UNCERTAIN")
+        st.header("Final Consensus Verdict")
+
+        fake_votes = [r for r in results_accumulator if r['label'] == 'Fake']
+        real_votes = [r for r in results_accumulator if r['label'] == 'Real']
+
+        n_fake = len(fake_votes)
+        n_real = len(real_votes)
+        total = len(results_accumulator)
+
+        if n_fake > n_real:
+            final_verdict = "FAKE"
+            avg_conf = sum([r['confidence'] for r in fake_votes]) / n_fake if n_fake > 0 else 0
+            color_func = st.error
+        elif n_real > n_fake:
+            final_verdict = "REAL"
+            avg_conf = sum([r['confidence'] for r in real_votes]) / n_real if n_real > 0 else 0
+            color_func = st.success
+        else:
+            final_verdict = "UNCERTAIN"
+            avg_conf = 0.0
+            color_func = st.warning
+
+        c1, c2 = st.columns([2, 1])
+
+        with c1:
+            color_func(f"### Majority: {final_verdict}")
+            st.write(f"**Votes:** {n_fake} Fake vs {n_real} Real")
+            if total > 0:
+                st.progress(n_fake / total, text="Fake Vote Share")
+
+        with c2:
+            st.metric("Avg Confidence (Winner)", f"{avg_conf:.1%}")
