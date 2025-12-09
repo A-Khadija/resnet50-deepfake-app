@@ -82,10 +82,8 @@ def build_model_architecture(model_key):
         return model
     return None
     
-# --- CRITICAL FIX: max_entries=1 prevents hoarding all models in RAM ---
 @st.cache_resource(max_entries=1, show_spinner=False)
 def load_model_cached(model_key):
-    # This wrapper function handles the heavy lifting
     return _load_model_logic(model_key)
 
 def _load_model_logic(model_key):
@@ -110,7 +108,7 @@ def _load_model_logic(model_key):
                 model = checkpoint
         
         model.to(device)
-        model.eval() # Always default to eval to save memory
+        model.eval() 
         return model
 
     except Exception as e:
@@ -132,7 +130,7 @@ def get_target_layer(model, model_name):
         if hasattr(model, 'features'): return model.features[-1] # EfficientNet
         if "Xception" in model_name:
             if hasattr(model, 'act4'): return model.act4
-            return list(model.modules())[-2] # Fallback
+            return list(model.modules())[-2] 
         return list(model.modules())[-2]
     except:
         return None
@@ -154,7 +152,6 @@ class GradCAM:
         self.gradients = grad
 
     def close(self):
-        # Clean up hooks to free memory
         self.handle.remove()
 
     def __call__(self, x, class_idx=None):
@@ -169,6 +166,7 @@ class GradCAM:
         score = output[0, class_idx]
         score.backward()
         
+        # SAFETY CHECK: If hooks didn't fire, return None
         if self.gradients is None or self.activations is None:
             return None
             
@@ -187,6 +185,7 @@ class GradCAM:
         return cam.cpu().detach().numpy()
         
 def visualize_cam(mask, img_pil):
+    # This was crashing because 'mask' was None
     heatmap = cv2.resize(mask, (img_pil.width, img_pil.height))
     heatmap = np.uint8(255 * heatmap)
     heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
@@ -210,7 +209,6 @@ if uploaded_file:
     if st.button("Start Analysis"):
         with st.spinner("Initializing..."):
             
-            # Decide which models to run
             if selected_option == "All Models":
                 models_to_run = list(MODELS.keys())
                 st.info(f"Running sequential analysis on {len(models_to_run)} models. Please wait...")
@@ -219,7 +217,6 @@ if uploaded_file:
 
             results_accumulator = []
             
-            # Setup columns
             if len(models_to_run) > 1:
                 cols = st.columns(3)
             else:
@@ -230,15 +227,13 @@ if uploaded_file:
             
             for idx, model_name in enumerate(models_to_run):
                 current_col = cols[idx % 3] if len(models_to_run) > 1 else cols[0]
-                
-                # Update progress
                 progress_bar.progress((idx + 1) / len(models_to_run))
                 
                 with current_col:
                     st.divider()
                     st.write(f"**{model_name}**")
                     
-                    # 1. Load Model (Uses cached loader with max_entries=1)
+                    # 1. Load Model
                     model_or_error = load_model_cached(model_name)
                     
                     if isinstance(model_or_error, str):
@@ -255,7 +250,6 @@ if uploaded_file:
                         # 3. Inference
                         target_layer = get_target_layer(model, model_name)
                         
-                        # Enable gradients ONLY for CAM calculation
                         with torch.set_grad_enabled(True):
                             output = model(img_tensor)
                             probs = F.softmax(output, dim=1)
@@ -263,17 +257,24 @@ if uploaded_file:
                             label = CLASS_NAMES[pred.item()]
                             confidence_val = conf.item()
 
-                            # 4. Grad-CAM
+                            # 4. Grad-CAM with SAFETY CHECK
                             if target_layer:
                                 cam_extractor = GradCAM(model, target_layer)
                                 activation_map = cam_extractor(img_tensor, class_idx=pred.item())
-                                overlay, heatmap = visualize_cam(activation_map, image)
-                                st.image(overlay, caption=f"CAM ({model_name})", width=True)
-                                cam_extractor.close() # Important: Remove hooks
+                                
+                                # FIX: Only visualize if map was actually generated
+                                if activation_map is not None:
+                                    overlay, heatmap = visualize_cam(activation_map, image)
+                                    # Updated deprecation warning: use_container_width
+                                    st.image(overlay, caption=f"CAM ({model_name})", use_container_width=True)
+                                else:
+                                    st.warning("⚠️ Heatmap unavailable for this model structure")
+                                    
+                                cam_extractor.close()
                             else:
-                                st.warning("No CAM available")
+                                st.warning("No CAM layer found")
 
-                        # Display Text Result
+                        # Display Result
                         if label == "Fake":
                             st.error(f"FAKE ({confidence_val:.2%})")
                         else:
@@ -284,13 +285,11 @@ if uploaded_file:
                         })
 
                     except Exception as e:
-                        st.error(f"Error: {e}")
+                        st.error(f"Inference Error: {e}")
                     
-                    # --- CRITICAL: FORCE MEMORY CLEANUP ---
-                    # Delete local references
+                    # Memory Cleanup
                     del img_tensor
                     del output
-                    # Force Garbage Collection
                     gc.collect()
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
@@ -310,11 +309,9 @@ if uploaded_file:
                 
                 if n_fake > n_real:
                     final_verdict = "FAKE"
-                    avg_conf = sum([r['confidence'] for r in fake_votes]) / n_fake
                     st.error(f"### Majority: {final_verdict} ({n_fake} vs {n_real})")
                 elif n_real > n_fake:
                     final_verdict = "REAL"
-                    avg_conf = sum([r['confidence'] for r in real_votes]) / n_real
                     st.success(f"### Majority: {final_verdict} ({n_real} vs {n_fake})")
                 else:
                     st.warning("### Result: UNCERTAIN (Tie)")
