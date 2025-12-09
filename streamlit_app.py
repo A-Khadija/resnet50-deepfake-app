@@ -40,8 +40,8 @@ MODELS = {
 
     # --- XCEPTION (299x299) ---
     "Xception (Transfer Learning)": {
-        "repo_id": "HoudaTag/xception_TransfertLearnin",
-        "filename": "xception_transfertLearning.pkl", 
+        "repo_id": "KhadijaAsehnoune12/xception_deepfake",
+        "filename": "xception_deepfake_full.pkl", 
         "img_size": 299 
     },
     "Xception (Fine-Tuning)": {
