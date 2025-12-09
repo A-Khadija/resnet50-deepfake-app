@@ -60,24 +60,22 @@ def build_model_architecture(model_key):
     Recreates the EXACT architecture used during training.
     """
     if "ResNet50" in model_key:
-        # Standard ResNet50 with modified FC
         model = models.resnet50(weights=None)
         num_ftrs = model.fc.in_features
         model.fc = nn.Linear(num_ftrs, 2)
         return model
         
     elif "EfficientNet" in model_key:
-        # Standard EfficientNet B4 with modified Classifier
         model = models.efficientnet_b4(weights=None)
         num_ftrs = model.classifier[1].in_features
         model.classifier[1] = nn.Linear(num_ftrs, 2)
         return model
         
     elif "Xception" in model_key:
-        # REPLICATE YOUR TRAINING LOGIC EXACTLY
-        model = timm.create_model("xception", pretrained=False, num_classes=2)
+        # UPDATED: Use 'legacy_xception' to silence the timm warning
+        # This is the same architecture as the old 'xception'
+        model = timm.create_model("legacy_xception", pretrained=False, num_classes=2)
         
-        # We must replicate the 'head replacement' logic so keys match (fc.1.weight vs fc.weight)
         if hasattr(model, "fc"):
             in_features = model.fc.in_features
             model.fc = nn.Sequential(
@@ -97,9 +95,8 @@ def build_model_architecture(model_key):
                 nn.Linear(in_features, 2)
             )
         return model
-        
     return None
-
+    
 @st.cache_resource
 def load_model(model_key):
     config = MODELS[model_key]
