@@ -27,12 +27,12 @@ MODELS = {
     },
     
     # --- EFFICIENTNET B4 (380x380) ---
-    "EfficientNet B4 (TL)": {
+    "EfficientNet B4 (Transfer Learning)": {
         "repo_id": "obm-ml/Efficientnetb4-TL",
         "filename": "efficientnetb4_best.pkl",  
         "img_size": 380
     },
-    "EfficientNet B4 (FN)": {
+    "EfficientNet B4 (Fine-Tuning)": {
         "repo_id": "obm-ml/Efficientnetb4-FN",
         "filename": "efficientnetb4_finetuned_best.pkl",  
         "img_size": 380
