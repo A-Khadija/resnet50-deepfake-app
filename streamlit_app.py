@@ -162,7 +162,6 @@ def visualize_cam(mask, img_pil):
 
 # --- 5. APP UI ---
 st.title("Deepfake Detection System")
-st.markdown("Low-Memory Mode Active")
 
 options = ["All Models"] + list(MODELS.keys())
 selected = st.sidebar.selectbox("Mode", options)
@@ -175,17 +174,23 @@ if upload and st.button("Start Analysis"):
     models_to_run = list(MODELS.keys()) if selected == "All Models" else [selected]
     results = []
     
-    # Simple container layout
-    container = st.container()
-    
+    if len(models_to_run) > 1:
+        cols = st.columns(3) # Creates 3 columns side-by-side
+    else:
+        cols = [st.container()]
+
     progress = st.progress(0)
     
     for i, name in enumerate(models_to_run):
         progress.progress((i + 1) / len(models_to_run))
         
-        with container:
-            st.write(f"--- \n **Analyzing with {name}...**")
-            
+        # --- ADD THIS TO SELECT THE CURRENT COLUMN ---
+        current_col = cols[i % 3] if len(models_to_run) > 1 else cols[0]
+        
+        # --- CHANGE "with container:" TO "with current_col:" ---
+        with current_col:
+            st.divider()
+            st.write(f"**{name}**")
             # 1. LOAD (No Cache)
             model = load_model_uncached(name)
             if isinstance(model, str):
