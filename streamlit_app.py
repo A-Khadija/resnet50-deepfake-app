@@ -187,34 +187,59 @@ class GradCAM:
         self.gradients = None
         self.activations = None
         
+        # We ONLY register the forward hook here.
+        # The backward gradient capture is now handled dynamically inside the forward pass.
         self.target_layer.register_forward_hook(self.save_activation)
-        self.target_layer.register_full_backward_hook(self.save_gradient)
 
     def save_activation(self, module, input, output):
         self.activations = output
+        
+        # --- CRITICAL FIX ---
+        # Instead of a module-level backward hook (which crashes on in-place ops),
+        # we register a hook on the tensor itself.
+        if output.requires_grad:
+            output.register_hook(self.save_gradient)
 
-    def save_gradient(self, module, grad_input, grad_output):
-        self.gradients = grad_output[0]
+    def save_gradient(self, grad):
+        # Tensor hooks receive just the gradient tensor
+        self.gradients = grad
 
     def __call__(self, x, class_idx=None):
+        # 1. Reset state
+        self.gradients = None
+        self.activations = None
+        
+        # 2. Forward Pass
         output = self.model(x)
+        
         if class_idx is None:
             class_idx = output.argmax(dim=1).item()
+            
+        # 3. Backward Pass
         self.model.zero_grad()
         score = output[0, class_idx]
         score.backward()
         
+        # 4. Generate CAM
+        if self.gradients is None or self.activations is None:
+            return None # Safety check if hooks didn't fire
+            
         gradients = self.gradients[0]
         activations = self.activations[0]
-        weights = torch.mean(gradients, dim=(1, 2))
-        cam = torch.zeros(activations.shape[1:], dtype=torch.float32, device=device)
         
+        # Global Average Pooling
+        weights = torch.mean(gradients, dim=(1, 2))
+        
+        # Weighted combination of activation maps
+        cam = torch.zeros(activations.shape[1:], dtype=torch.float32, device=device)
         for i, w in enumerate(weights):
             cam += w * activations[i]
             
+        # ReLU and Normalization
         cam = F.relu(cam)
         cam = cam - cam.min()
         cam = cam / (cam.max() + 1e-7)
+        
         return cam.cpu().detach().numpy()
 
 def visualize_cam(mask, img_pil):
