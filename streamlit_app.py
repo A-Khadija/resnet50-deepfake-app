@@ -316,7 +316,8 @@ if uploaded_file:
                             with torch.enable_grad():
                                 activation_map = cam_extractor(img_tensor, class_idx=pred.item())
                                 overlay, heatmap = visualize_cam(activation_map, image)
-                                st.image(overlay, caption=f"CAM ({model_name})", width="stretch")                        else:
+                                st.image(overlay, caption=f"CAM ({model_name})", width="stretch")                        
+                        else:
                             st.warning("Layer hook failed (No CAM)")
                         
                     except Exception as e:
