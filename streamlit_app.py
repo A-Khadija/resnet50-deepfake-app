@@ -8,7 +8,7 @@ import numpy as np
 import cv2
 from huggingface_hub import hf_hub_download
 import timm 
-import gc  # <--- Added for memory management
+import gc
 
 # --- 1. CONFIGURATION ---
 st.set_page_config(page_title="Deepfake Inspector", layout="wide")
@@ -82,6 +82,7 @@ def build_model_architecture(model_key):
         return model
     return None
     
+# --- CACHE: max_entries=1 prevents RAM saturation ---
 @st.cache_resource(max_entries=1, show_spinner=False)
 def load_model_cached(model_key):
     return _load_model_logic(model_key)
@@ -166,7 +167,6 @@ class GradCAM:
         score = output[0, class_idx]
         score.backward()
         
-        # SAFETY CHECK: If hooks didn't fire, return None
         if self.gradients is None or self.activations is None:
             return None
             
@@ -185,7 +185,6 @@ class GradCAM:
         return cam.cpu().detach().numpy()
         
 def visualize_cam(mask, img_pil):
-    # This was crashing because 'mask' was None
     heatmap = cv2.resize(mask, (img_pil.width, img_pil.height))
     heatmap = np.uint8(255 * heatmap)
     heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
@@ -250,6 +249,12 @@ if uploaded_file:
                         # 3. Inference
                         target_layer = get_target_layer(model, model_name)
                         
+                        # --- CRITICAL FIX FOR TRANSFER LEARNING MODELS ---
+                        # Force the target layer to accept gradients, even if the model is frozen
+                        if target_layer:
+                            for param in target_layer.parameters():
+                                param.requires_grad = True
+                        
                         with torch.set_grad_enabled(True):
                             output = model(img_tensor)
                             probs = F.softmax(output, dim=1)
@@ -257,18 +262,16 @@ if uploaded_file:
                             label = CLASS_NAMES[pred.item()]
                             confidence_val = conf.item()
 
-                            # 4. Grad-CAM with SAFETY CHECK
+                            # 4. Grad-CAM
                             if target_layer:
                                 cam_extractor = GradCAM(model, target_layer)
                                 activation_map = cam_extractor(img_tensor, class_idx=pred.item())
                                 
-                                # FIX: Only visualize if map was actually generated
                                 if activation_map is not None:
                                     overlay, heatmap = visualize_cam(activation_map, image)
-                                    # Updated deprecation warning: use_container_width
                                     st.image(overlay, caption=f"CAM ({model_name})", use_container_width=True)
                                 else:
-                                    st.warning("⚠️ Heatmap unavailable for this model structure")
+                                    st.warning("⚠️ Heatmap unavailable (Gradient missing)")
                                     
                                 cam_extractor.close()
                             else:
